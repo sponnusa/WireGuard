@@ -10,6 +10,7 @@
 #include <linux/version.h>
 #include <crypto/algapi.h>
 #include <crypto/scatterwalk.h>
+#include <linux/kbuild.h>
 
 #ifdef CONFIG_X86_64
 #include <asm/cpufeature.h>
@@ -77,18 +78,51 @@ static inline u32 and(u32 v, u32 mask)
 	return v & mask;
 }
 
+#define CC20_ARRAY_SIZE CHACHA20_BLOCK_SIZE / sizeof(u32)
 
 struct chacha20_ctx {
-	u32 state[16];
+	u32   state[CC20_ARRAY_SIZE];
+	u32  stream[CC20_ARRAY_SIZE];
 } __aligned(32);
 
-static void chacha20_generic_block(struct chacha20_ctx *ctx, void *stream)
+struct poly1305_ctx {
+	/* key */
+	u32 r[5];
+	/* finalize key */
+	u32 s[4];
+	/* accumulator */
+	u32 h[5];
+	/* partial buffer */
+	u8 buf[POLY1305_BLOCK_SIZE];
+	/* bytes used in partial buffer */
+	u32 buflen;
+#ifdef CONFIG_X86_64
+	/* derived key u set? */
+	bool uset;
+	/* derived keys r^3, r^4 set? */
+	bool wset;
+	/* derived Poly1305 key r^2 */
+	u32 u[5];
+	/* derived Poly1305 key r^3 */
+	u32 r3[5];
+	/* derived Poly1305 key r^4 */
+	u32 r4[5];
+#endif
+};
+
+#ifdef CONFIG_CPU_MIPS32_R2
+void chacha20_keysetup(struct chacha20_ctx *ctx, const u8 key[static 32], const u8 nonce[static 8]);
+void chacha20_generic_block(struct chacha20_ctx *ctx);
+#endif
+
+#ifndef CONFIG_CPU_MIPS32_R2
+static void chacha20_generic_block(struct chacha20_ctx *ctx)
 {
-	u32 x[CHACHA20_BLOCK_SIZE / sizeof(u32)];
-	__le32 *out = stream;
+	u32 x[CC20_ARRAY_SIZE];
+	__u32 *out = stream;
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(x); i++)
+	for (i = 0; i < CC20_ARRAY_SIZE; i++)
 		x[i] = ctx->state[i];
 
 	for (i = 0; i < 20; i += 2) {
@@ -133,8 +167,8 @@ static void chacha20_generic_block(struct chacha20_ctx *ctx, void *stream)
 		x[9]  += x[14];   x[4]  = rotl32(x[4]  ^ x[9],   7);
 	}
 
-	for (i = 0; i < ARRAY_SIZE(x); i++)
-		out[i] = cpu_to_le32(x[i] + ctx->state[i]);
+	for (i = 0; i < CC20_ARRAY_SIZE ; i++)
+		ctx->stream[i] = cpu_to_le32(x[i] + ctx->state[i]);
 
 	ctx->state[12]++;
 }
@@ -159,17 +193,21 @@ static void chacha20_keysetup(struct chacha20_ctx *ctx, const u8 key[static 32],
 	ctx->state[14] = le32_to_cpuvp(nonce + 0);
 	ctx->state[15] = le32_to_cpuvp(nonce + 4);
 }
+#endif
 
 static void chacha20_crypt(struct chacha20_ctx *ctx, u8 *dst, const u8 *src, unsigned int bytes, bool have_simd)
 {
+#ifdef CONFIG_AS_SSSE3
 	u8 buf[CHACHA20_BLOCK_SIZE];
+#endif
+
+#ifdef CONFIG_X86_64
 
 	if (!have_simd
-#ifdef CONFIG_X86_64
 		|| !chacha20poly1305_use_ssse3
-#endif
 	)
 		goto no_simd;
+#endif
 
 #ifdef CONFIG_X86_64
 #ifdef CONFIG_AS_AVX2
@@ -212,40 +250,20 @@ no_simd:
 		memcpy(dst, src, bytes);
 
 	while (bytes >= CHACHA20_BLOCK_SIZE) {
-		chacha20_generic_block(ctx, buf);
-		crypto_xor(dst, buf, CHACHA20_BLOCK_SIZE);
+		chacha20_generic_block(ctx);
+		crypto_xor(dst, (u8 *)&ctx->stream, CHACHA20_BLOCK_SIZE);
 		bytes -= CHACHA20_BLOCK_SIZE;
 		dst += CHACHA20_BLOCK_SIZE;
 	}
 	if (bytes) {
-		chacha20_generic_block(ctx, buf);
-		crypto_xor(dst, buf, bytes);
+		chacha20_generic_block(ctx);
+		crypto_xor(dst, (u8 *)&ctx->stream, bytes);
 	}
 }
 
-struct poly1305_ctx {
-	/* key */
-	u32 r[5];
-	/* finalize key */
-	u32 s[4];
-	/* accumulator */
-	u32 h[5];
-	/* partial buffer */
-	u8 buf[POLY1305_BLOCK_SIZE];
-	/* bytes used in partial buffer */
-	unsigned int buflen;
-	/* derived key u set? */
-	bool uset;
-	/* derived keys r^3, r^4 set? */
-	bool wset;
-	/* derived Poly1305 key r^2 */
-	u32 u[5];
-	/* derived Poly1305 key r^3 */
-	u32 r3[5];
-	/* derived Poly1305 key r^4 */
-	u32 r4[5];
-};
-
+#ifdef CONFIG_CPU_MIPS32_R2
+static void poly1305_init(struct poly1305_ctx *ctx, const u8 key[static POLY1305_KEY_SIZE]);
+#else
 static void poly1305_init(struct poly1305_ctx *ctx, const u8 key[static POLY1305_KEY_SIZE])
 {
 #ifndef CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS
@@ -275,7 +293,11 @@ static void poly1305_init(struct poly1305_ctx *ctx, const u8 key[static POLY1305
 	ctx->s[2] = le32_to_cpuvp(key +  24);
 	ctx->s[3] = le32_to_cpuvp(key +  28);
 }
+#endif
 
+#ifdef CONFIG_CPU_MIPS32_R2
+static unsigned int poly1305_generic_blocks(struct poly1305_ctx *ctx, const u8 *src, unsigned int srclen, u32 hibit);
+#else
 static unsigned int poly1305_generic_blocks(struct poly1305_ctx *ctx, const u8 *src, unsigned int srclen, u32 hibit)
 {
 	u32 r0, r1, r2, r3, r4;
@@ -350,6 +372,7 @@ static unsigned int poly1305_generic_blocks(struct poly1305_ctx *ctx, const u8 *
 
 	return srclen;
 }
+#endif
 
 #ifdef CONFIG_X86_64
 static void poly1305_simd_mult(u32 *a, const u32 *b)
