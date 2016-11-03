@@ -241,9 +241,11 @@ int packet_create_data(struct sk_buff *skb, struct wireguard_peer *peer, void(*c
 	} else
 #endif
 	{
+		read_unlock_bh(&peer->resend_queue_lock);
 		skb_encrypt(skb, ctx);
 		skb_reset(skb);
 		callback(skb, peer);
+		read_lock_bh(&peer->resend_queue_lock);
 	}
 	return 0;
 

@@ -21,7 +21,7 @@ struct wireguard_peer {
 		struct flowi4 fl4;
 		struct flowi6 fl6;
 	} endpoint_flow;
-	rwlock_t endpoint_lock;
+	rwlock_t endpoint_lock, resend_queue_lock;
 	struct noise_handshake handshake;
 	struct noise_keypairs keypairs;
 	uint64_t last_sent_handshake;

@@ -155,8 +155,12 @@ static void message_create_data_done(struct sk_buff *skb, struct wireguard_peer 
 	if (atomic_dec_and_test(&PACKET_CB(skb)->bundle->count)) {
 		send_off_bundle(PACKET_CB(skb)->bundle, peer);
 		/* We queue the remaining ones only after sending, to retain packet order. */
-		if (unlikely(peer->need_resend_queue))
+		write_lock_bh(&peer->resend_queue_lock);
+		if (unlikely(peer->need_resend_queue)) {
+			write_unlock_bh(&peer->resend_queue_lock);
 			packet_send_queue(peer);
+		}
+		write_unlock_bh(&peer->resend_queue_lock);
 	}
 	keep_key_fresh(peer);
 }
@@ -208,6 +212,9 @@ int packet_send_queue(struct wireguard_peer *peer)
 		/* Extract the TOS value before encryption, for ECN encapsulation. */
 		PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0 /* No outer TOS: no leak. TODO: should we use flowi->tos as outer? */, ip_hdr(skb), skb);
 
+		/* Take the read lock so that no outgoing packets are permitted to complete until we're done. */
+		read_lock_bh(&peer->resend_queue_lock);
+
 		/* We submit it for encryption and sending. */
 		switch (packet_create_data(skb, peer, message_create_data_done, parallel)) {
 		case 0:
@@ -254,6 +261,8 @@ int packet_send_queue(struct wireguard_peer *peer)
 			spin_lock_irqsave(&peer->tx_packet_queue.lock, flags);
 			skb_queue_splice(&local_queue, &peer->tx_packet_queue);
 			spin_unlock_irqrestore(&peer->tx_packet_queue.lock, flags);
+
+			read_unlock_bh(&peer->resend_queue_lock);
 			goto out;
 		default:
 			/* If we failed for any other reason, we want to just free the packet and
@@ -286,6 +295,7 @@ int packet_send_queue(struct wireguard_peer *peer)
 			 * actually moving the bundle. */
 			first = bundle->first;
 		}
+		read_unlock_bh(&peer->resend_queue_lock);
 	}
 out:
 	return NETDEV_TX_OK;

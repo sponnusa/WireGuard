@@ -33,6 +33,7 @@ struct wireguard_peer *peer_create(struct wireguard_device *wg, const u8 public_
 	mutex_init(&peer->keypairs.keypair_update_lock);
 	INIT_WORK(&peer->transmit_handshake_work, packet_send_queued_handshakes);
 	rwlock_init(&peer->endpoint_lock);
+	rwlock_init(&peer->resend_queue_lock);
 	skb_queue_head_init(&peer->tx_packet_queue);
 	kref_init(&peer->refcount);
 	pubkey_hashtable_add(&wg->peer_hashtable, peer);
