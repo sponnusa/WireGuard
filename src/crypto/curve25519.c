@@ -252,6 +252,13 @@ static void fcontract(uint8_t *output, const felem input)
 	store_limb(output+24, (t[3] >> 39) | (t[4] << 12));
 }
 
+struct other_stack {
+	limb origx[5], origxprime[5], zzz[5], xx[5], zz[5], xxprime[5], zzprime[5], zzzprime[5];
+	limb a[5], b[5], c[5], d[5], e[5], f[5], g[5], h[5];
+	limb bp[5], x[5], z[5], zmone[5];
+	uint8_t ee[32];
+};
+
 /* Input: Q, Q', Q-Q'
  * Output: 2Q, Q+Q'
  *
@@ -261,37 +268,36 @@ static void fcontract(uint8_t *output, const felem input)
  *   xprime zprime: short form, destroyed
  *   qmqp: short form, preserved
  */
-static void fmonty(limb *x2, limb *z2, /* output 2Q */
+static void fmonty(struct other_stack *s,
+			 limb *x2, limb *z2, /* output 2Q */
 			 limb *x3, limb *z3, /* output Q + Q' */
 			 limb *x, limb *z,   /* input Q */
 			 limb *xprime, limb *zprime, /* input Q' */
 			 const limb *qmqp /* input Q - Q' */)
 {
-	limb origx[5], origxprime[5], zzz[5], xx[5], zz[5], xxprime[5], zzprime[5], zzzprime[5];
-
-	memcpy(origx, x, 5 * sizeof(limb));
+	memcpy(s->origx, x, 5 * sizeof(limb));
 	fsum(x, z);
-	fdifference_backwards(z, origx);  // does x - z
+	fdifference_backwards(z, s->origx);  // does x - z
 
-	memcpy(origxprime, xprime, sizeof(limb) * 5);
+	memcpy(s->origxprime, xprime, sizeof(limb) * 5);
 	fsum(xprime, zprime);
-	fdifference_backwards(zprime, origxprime);
-	fmul(xxprime, xprime, z);
-	fmul(zzprime, x, zprime);
-	memcpy(origxprime, xxprime, sizeof(limb) * 5);
-	fsum(xxprime, zzprime);
-	fdifference_backwards(zzprime, origxprime);
-	fsquare_times(x3, xxprime, 1);
-	fsquare_times(zzzprime, zzprime, 1);
-	fmul(z3, zzzprime, qmqp);
+	fdifference_backwards(zprime, s->origxprime);
+	fmul(s->xxprime, xprime, z);
+	fmul(s->zzprime, x, zprime);
+	memcpy(s->origxprime, s->xxprime, sizeof(limb) * 5);
+	fsum(s->xxprime, s->zzprime);
+	fdifference_backwards(s->zzprime, s->origxprime);
+	fsquare_times(x3, s->xxprime, 1);
+	fsquare_times(s->zzzprime, s->zzprime, 1);
+	fmul(z3, s->zzzprime, qmqp);
 
-	fsquare_times(xx, x, 1);
-	fsquare_times(zz, z, 1);
-	fmul(x2, xx, zz);
-	fdifference_backwards(zz, xx);  // does zz = xx - zz
-	fscalar_product(zzz, zz, 121665);
-	fsum(zzz, xx);
-	fmul(z2, zz, zzz);
+	fsquare_times(s->xx, x, 1);
+	fsquare_times(s->zz, z, 1);
+	fmul(x2, s->xx, s->zz);
+	fdifference_backwards(s->zz, s->xx);  // does s->zz = s->xx - s->zz
+	fscalar_product(s->zzz, s->zz, 121665);
+	fsum(s->zzz, s->xx);
+	fmul(z2, s->zz, s->zzz);
 }
 
 /* Maybe swap the contents of two limb arrays (@a and @b), each @len elements
@@ -318,15 +324,13 @@ static void swap_conditional(limb a[5], limb b[5], limb iswap)
  *   n: a little endian, 32-byte number
  *   q: a point of the curve (short form)
  */
-static void cmult(limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
+static void cmult(struct other_stack *s, limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
 {
-	limb a[5] = {0}, b[5] = {1}, c[5] = {1}, d[5] = {0};
-	limb *nqpqx = a, *nqpqz = b, *nqx = c, *nqz = d, *t;
-	limb e[5] = {0}, f[5] = {1}, g[5] = {0}, h[5] = {1};
-	limb *nqpqx2 = e, *nqpqz2 = f, *nqx2 = g, *nqz2 = h;
-
 	unsigned i, j;
+	limb *nqpqx = s->a, *nqpqz = s->b, *nqx = s->c, *nqz = s->d, *t;
+	limb *nqpqx2 = s->e, *nqpqz2 = s->f, *nqx2 = s->g, *nqz2 = s->h;
 
+	*nqpqz = *nqx = *nqpqz2 = *nqz2 = 1;
 	memcpy(nqpqx, q, sizeof(limb) * 5);
 
 	for (i = 0; i < 32; ++i) {
@@ -336,11 +340,12 @@ static void cmult(limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
 
 			swap_conditional(nqx, nqpqx, bit);
 			swap_conditional(nqz, nqpqz, bit);
-			fmonty(nqx2, nqz2,
-						 nqpqx2, nqpqz2,
-						 nqx, nqz,
-						 nqpqx, nqpqz,
-						 q);
+			fmonty(s,
+				 nqx2, nqz2,
+				 nqpqx2, nqpqz2,
+				 nqx, nqz,
+				 nqpqx, nqpqz,
+				 q);
 			swap_conditional(nqx2, nqpqx2, bit);
 			swap_conditional(nqz2, nqpqz2, bit);
 
@@ -392,28 +397,6 @@ static void crecip(felem out, const felem z)
 	/* 2^255 - 2^5 */ fsquare_times(t0, t0, 5);
 	/* 2^255 - 21 */ fmul(out, t0, a);
 }
-
-void curve25519(uint8_t mypublic[CURVE25519_POINT_SIZE], const uint8_t secret[CURVE25519_POINT_SIZE], const uint8_t basepoint[CURVE25519_POINT_SIZE])
-{
-	limb bp[5], x[5], z[5], zmone[5];
-	uint8_t e[32];
-
-	memcpy(e, secret, 32);
-	normalize_secret(e);
-
-	fexpand(bp, basepoint);
-	cmult(x, z, e, bp);
-	crecip(zmone, z);
-	fmul(z, x, zmone);
-	fcontract(mypublic, z);
-
-	memzero_explicit(e, sizeof(e));
-	memzero_explicit(bp, sizeof(bp));
-	memzero_explicit(x, sizeof(x));
-	memzero_explicit(z, sizeof(z));
-	memzero_explicit(zmone, sizeof(zmone));
-}
-
 #else
 typedef int64_t limb;
 
@@ -975,6 +958,13 @@ static void fcontract(uint8_t *output, limb *input_limbs)
 #undef F
 }
 
+struct other_stack {
+	limb origx[10], origxprime[10], zzz[19], xx[19], zz[19], xxprime[19], zzprime[19], zzzprime[19], xxxprime[19];
+	limb a[19], b[19], c[19], d[19], e[19], f[19], g[19], h[19];
+	limb bp[10], x[10], z[11], zmone[10];
+	uint8_t ee[32];
+};
+
 /* Input: Q, Q', Q-Q'
  * Output: 2Q, Q+Q'
  *
@@ -986,76 +976,74 @@ static void fcontract(uint8_t *output, limb *input_limbs)
  *
  * On entry and exit, the absolute value of the limbs of all inputs and outputs
  * are < 2^26. */
-static void fmonty(limb *x2, limb *z2,  /* output 2Q */
+static void fmonty(struct other_stack *s,
+		   limb *x2, limb *z2,  /* output 2Q */
 		   limb *x3, limb *z3,  /* output Q + Q' */
 		   limb *x, limb *z,    /* input Q */
 		   limb *xprime, limb *zprime,  /* input Q' */
 		   const limb *qmqp /* input Q - Q' */)
 {
-	limb origx[10], origxprime[10], zzz[19], xx[19], zz[19], xxprime[19],
-				zzprime[19], zzzprime[19], xxxprime[19];
-
-	memcpy(origx, x, 10 * sizeof(limb));
+	memcpy(s->origx, x, 10 * sizeof(limb));
 	fsum(x, z);
 	/* |x[i]| < 2^27 */
-	fdifference(z, origx);  /* does x - z */
+	fdifference(z, s->origx);  /* does x - z */
 	/* |z[i]| < 2^27 */
 
-	memcpy(origxprime, xprime, sizeof(limb) * 10);
+	memcpy(s->origxprime, xprime, sizeof(limb) * 10);
 	fsum(xprime, zprime);
 	/* |xprime[i]| < 2^27 */
-	fdifference(zprime, origxprime);
+	fdifference(zprime, s->origxprime);
 	/* |zprime[i]| < 2^27 */
-	fproduct(xxprime, xprime, z);
-	/* |xxprime[i]| < 14*2^54: the largest product of two limbs will be <
+	fproduct(s->xxprime, xprime, z);
+	/* |s->xxprime[i]| < 14*2^54: the largest product of two limbs will be <
 	 * 2^(27+27) and fproduct adds together, at most, 14 of those products.
 	 * (Approximating that to 2^58 doesn't work out.) */
-	fproduct(zzprime, x, zprime);
-	/* |zzprime[i]| < 14*2^54 */
-	freduce_degree(xxprime);
-	freduce_coefficients(xxprime);
-	/* |xxprime[i]| < 2^26 */
-	freduce_degree(zzprime);
-	freduce_coefficients(zzprime);
-	/* |zzprime[i]| < 2^26 */
-	memcpy(origxprime, xxprime, sizeof(limb) * 10);
-	fsum(xxprime, zzprime);
-	/* |xxprime[i]| < 2^27 */
-	fdifference(zzprime, origxprime);
-	/* |zzprime[i]| < 2^27 */
-	fsquare(xxxprime, xxprime);
-	/* |xxxprime[i]| < 2^26 */
-	fsquare(zzzprime, zzprime);
-	/* |zzzprime[i]| < 2^26 */
-	fproduct(zzprime, zzzprime, qmqp);
-	/* |zzprime[i]| < 14*2^52 */
-	freduce_degree(zzprime);
-	freduce_coefficients(zzprime);
-	/* |zzprime[i]| < 2^26 */
-	memcpy(x3, xxxprime, sizeof(limb) * 10);
-	memcpy(z3, zzprime, sizeof(limb) * 10);
+	fproduct(s->zzprime, x, zprime);
+	/* |s->zzprime[i]| < 14*2^54 */
+	freduce_degree(s->xxprime);
+	freduce_coefficients(s->xxprime);
+	/* |s->xxprime[i]| < 2^26 */
+	freduce_degree(s->zzprime);
+	freduce_coefficients(s->zzprime);
+	/* |s->zzprime[i]| < 2^26 */
+	memcpy(s->origxprime, s->xxprime, sizeof(limb) * 10);
+	fsum(s->xxprime, s->zzprime);
+	/* |s->xxprime[i]| < 2^27 */
+	fdifference(s->zzprime, s->origxprime);
+	/* |s->zzprime[i]| < 2^27 */
+	fsquare(s->xxxprime, s->xxprime);
+	/* |s->xxxprime[i]| < 2^26 */
+	fsquare(s->zzzprime, s->zzprime);
+	/* |s->zzzprime[i]| < 2^26 */
+	fproduct(s->zzprime, s->zzzprime, qmqp);
+	/* |s->zzprime[i]| < 14*2^52 */
+	freduce_degree(s->zzprime);
+	freduce_coefficients(s->zzprime);
+	/* |s->zzprime[i]| < 2^26 */
+	memcpy(x3, s->xxxprime, sizeof(limb) * 10);
+	memcpy(z3, s->zzprime, sizeof(limb) * 10);
 
-	fsquare(xx, x);
-	/* |xx[i]| < 2^26 */
-	fsquare(zz, z);
-	/* |zz[i]| < 2^26 */
-	fproduct(x2, xx, zz);
+	fsquare(s->xx, x);
+	/* |s->xx[i]| < 2^26 */
+	fsquare(s->zz, z);
+	/* |s->zz[i]| < 2^26 */
+	fproduct(x2, s->xx, s->zz);
 	/* |x2[i]| < 14*2^52 */
 	freduce_degree(x2);
 	freduce_coefficients(x2);
 	/* |x2[i]| < 2^26 */
-	fdifference(zz, xx);  // does zz = xx - zz
-	/* |zz[i]| < 2^27 */
-	memset(zzz + 10, 0, sizeof(limb) * 9);
-	fscalar_product(zzz, zz, 121665);
-	/* |zzz[i]| < 2^(27+17) */
+	fdifference(s->zz, s->xx);  // does s->zz = s->xx - s->zz
+	/* |s->zz[i]| < 2^27 */
+	memset(s->zzz + 10, 0, sizeof(limb) * 9);
+	fscalar_product(s->zzz, s->zz, 121665);
+	/* |s->zzz[i]| < 2^(27+17) */
 	/* No need to call freduce_degree here:
 		 fscalar_product doesn't increase the degree of its input. */
-	freduce_coefficients(zzz);
-	/* |zzz[i]| < 2^26 */
-	fsum(zzz, xx);
-	/* |zzz[i]| < 2^27 */
-	fproduct(z2, zz, zzz);
+	freduce_coefficients(s->zzz);
+	/* |s->zzz[i]| < 2^26 */
+	fsum(s->zzz, s->xx);
+	/* |s->zzz[i]| < 2^27 */
+	fproduct(z2, s->zz, s->zzz);
 	/* |z2[i]| < 14*2^(26+27) */
 	freduce_degree(z2);
 	freduce_coefficients(z2);
@@ -1088,15 +1076,13 @@ static void swap_conditional(limb a[19], limb b[19], limb iswap)
  *   resultx/resultz: the x coordinate of the resulting curve point (short form)
  *   n: a little endian, 32-byte number
  *   q: a point of the curve (short form) */
-static void cmult(limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
+static void cmult(struct other_stack *s, limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
 {
-	limb a[19] = {0}, b[19] = {1}, c[19] = {1}, d[19] = {0};
-	limb *nqpqx = a, *nqpqz = b, *nqx = c, *nqz = d, *t;
-	limb e[19] = {0}, f[19] = {1}, g[19] = {0}, h[19] = {1};
-	limb *nqpqx2 = e, *nqpqz2 = f, *nqx2 = g, *nqz2 = h;
-
 	unsigned i, j;
+	limb *nqpqx = s->a, *nqpqz = s->b, *nqx = s->c, *nqz = s->d, *t;
+	limb *nqpqx2 = s->e, *nqpqz2 = s->f, *nqx2 = s->g, *nqz2 = s->h;
 
+	*nqpqz = *nqx = *nqpqz2 = *nqz2 = 1;
 	memcpy(nqpqx, q, sizeof(limb) * 10);
 
 	for (i = 0; i < 32; ++i) {
@@ -1106,7 +1092,8 @@ static void cmult(limb *resultx, limb *resultz, const uint8_t *n, const limb *q)
 
 			swap_conditional(nqx, nqpqx, bit);
 			swap_conditional(nqz, nqpqz, bit);
-			fmonty(nqx2, nqz2,
+			fmonty(s,
+			       nqx2, nqz2,
 			       nqpqx2, nqpqz2,
 			       nqx, nqz,
 			       nqpqx, nqpqz,
@@ -1201,28 +1188,27 @@ static void crecip(limb *out, const limb *z)
 	/* 2^255 - 2^5 */ fsquare(t1,t0);
 	/* 2^255 - 21 */ fmul(out,t1,z11);
 }
+#endif
 
 void curve25519(uint8_t mypublic[CURVE25519_POINT_SIZE], const uint8_t secret[CURVE25519_POINT_SIZE], const uint8_t basepoint[CURVE25519_POINT_SIZE])
 {
-	limb bp[10], x[10], z[11], zmone[10];
-	uint8_t e[32];
+	struct other_stack *s = kzalloc(sizeof(struct other_stack), GFP_KERNEL);
+	if (unlikely(!s)) {
+		memset(mypublic, 0, CURVE25519_POINT_SIZE);
+		return;
+	}
 
-	memcpy(e, secret, 32);
-	normalize_secret(e);
+	memcpy(s->ee, secret, 32);
+	normalize_secret(s->ee);
 
-	fexpand(bp, basepoint);
-	cmult(x, z, e, bp);
-	crecip(zmone, z);
-	fmul(z, x, zmone);
-	fcontract(mypublic, z);
+	fexpand(s->bp, basepoint);
+	cmult(s, s->x, s->z, s->ee, s->bp);
+	crecip(s->zmone, s->z);
+	fmul(s->z, s->x, s->zmone);
+	fcontract(mypublic, s->z);
 
-	memzero_explicit(e, sizeof(e));
-	memzero_explicit(bp, sizeof(bp));
-	memzero_explicit(x, sizeof(x));
-	memzero_explicit(z, sizeof(z));
-	memzero_explicit(zmone, sizeof(zmone));
+	kzfree(s);
 }
-#endif
 
 
 void curve25519_generate_secret(uint8_t secret[CURVE25519_POINT_SIZE])
