@@ -26,8 +26,10 @@ static inline void rx_stats(struct wireguard_peer *peer, size_t len)
 static inline void update_latest_addr(struct wireguard_peer *peer, struct sk_buff *skb)
 {
 	struct sockaddr_storage addr = { 0 };
-	if (!socket_addr_from_skb(&addr, skb))
-		socket_set_peer_addr(peer, &addr);
+	if (!socket_src_addr_from_skb(&addr, skb))
+		socket_set_peer_dst_addr(peer, &addr);
+	if (!socket_dst_addr_from_skb(&addr, skb))
+		socket_set_peer_src_addr(peer, &addr);
 }
 
 static inline int skb_data_offset(struct sk_buff *skb, size_t *data_offset, size_t *data_len)
@@ -35,7 +37,7 @@ static inline int skb_data_offset(struct sk_buff *skb, size_t *data_offset, size
 	struct udphdr *udp;
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 	struct sockaddr_storage addr = { 0 };
-	socket_addr_from_skb(&addr, skb);
+	socket_src_addr_from_skb(&addr, skb);
 #else
 	static const u8 addr;
 #endif
@@ -86,7 +88,7 @@ static void receive_handshake_packet(struct wireguard_device *wg, void *data, si
 
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 	struct sockaddr_storage addr = { 0 };
-	socket_addr_from_skb(&addr, skb);
+	socket_src_addr_from_skb(&addr, skb);
 #else
 	static const u8 addr;
 #endif
@@ -279,7 +281,7 @@ static void receive_data_packet(struct sk_buff *skb, struct wireguard_peer *peer
 	if (unlikely(routed_peer != peer)) {
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 		struct sockaddr_storage unencrypted_addr = { 0 };
-		socket_addr_from_skb(&unencrypted_addr, skb);
+		socket_src_addr_from_skb(&unencrypted_addr, skb);
 		net_dbg_ratelimited("Packet has unallowed src IP (%pISc) from peer %Lu (%pISpfsc)\n", &unencrypted_addr, peer->internal_id, addr);
 #endif
 		++dev->stats.rx_errors;
@@ -301,7 +303,7 @@ packet_processed:
 continue_processing:
 	timers_any_authenticated_packet_received(peer);
 	timers_any_authenticated_packet_traversal(peer);
-	socket_set_peer_addr(peer, addr);
+	socket_set_peer_dst_addr(peer, addr);
 	peer_put(peer);
 }
 
@@ -310,7 +312,7 @@ void packet_receive(struct wireguard_device *wg, struct sk_buff *skb)
 	size_t len, offset;
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 	struct sockaddr_storage addr = { 0 };
-	socket_addr_from_skb(&addr, skb);
+	socket_src_addr_from_skb(&addr, skb);
 #else
 	static const u8 addr;
 #endif

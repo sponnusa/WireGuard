@@ -414,7 +414,7 @@ void packet_consume_data(struct sk_buff *skb, size_t offset, struct wireguard_de
 	uint64_t nonce;
 	__le32 idx;
 
-	ret = socket_addr_from_skb(&addr, skb);
+	ret = socket_src_addr_from_skb(&addr, skb);
 	if (unlikely(ret < 0))
 		goto err;
 

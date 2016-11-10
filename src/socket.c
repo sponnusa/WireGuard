@@ -13,17 +13,20 @@
 #include <net/udp_tunnel.h>
 #include <net/ipv6.h>
 
-static inline int send4(struct wireguard_device *wg, struct sk_buff *skb, struct sockaddr_in *addr, uint8_t ds, struct dst_cache *cache)
+static inline int send4(struct wireguard_device *wg, struct sk_buff *skb, struct sockaddr_in *dst_addr, struct sockaddr_in *src_addr, uint8_t ds, struct dst_cache *cache)
 {
 	struct flowi4 fl = {
-		.daddr = addr->sin_addr.s_addr,
-		.fl4_dport = addr->sin_port,
+		.daddr = dst_addr->sin_addr.s_addr,
+		.fl4_dport = dst_addr->sin_port,
 		.fl4_sport = htons(wg->incoming_port),
 		.flowi4_proto = IPPROTO_UDP
 	};
 	struct rtable *rt = NULL;
 	struct sock *sock;
 	int ret = 0;
+
+	if (src_addr)
+		fl.saddr = src_addr->sin_addr.s_addr;
 
 	skb->next = skb->prev = NULL;
 	skb->dev = netdev_pub(wg);
@@ -44,12 +47,12 @@ static inline int send4(struct wireguard_device *wg, struct sk_buff *skb, struct
 		rt = ip_route_output_flow(sock_net(sock), &fl, sock);
 		if (unlikely(IS_ERR(rt))) {
 			ret = PTR_ERR(rt);
-			net_dbg_ratelimited("No route to %pISpfsc, error %d\n", addr, ret);
+			net_dbg_ratelimited("No route to %pISpfsc, error %d\n", dst_addr, ret);
 			goto err;
 		} else if (unlikely(rt->dst.dev == skb->dev)) {
 			dst_release(&rt->dst);
 			ret = -ELOOP;
-			net_dbg_ratelimited("Avoiding routing loop to %pISpfsc\n", addr);
+			net_dbg_ratelimited("Avoiding routing loop to %pISpfsc\n", dst_addr);
 			goto err;
 		}
 		if (cache)
@@ -70,20 +73,23 @@ out:
 	return ret;
 }
 
-static inline int send6(struct wireguard_device *wg, struct sk_buff *skb, struct sockaddr_in6 *addr, uint8_t ds, struct dst_cache *cache)
+static inline int send6(struct wireguard_device *wg, struct sk_buff *skb, struct sockaddr_in6 *dst_addr, struct sockaddr_in6 *src_addr, uint8_t ds, struct dst_cache *cache)
 {
 #if IS_ENABLED(CONFIG_IPV6)
 	struct flowi6 fl = {
-		.daddr = addr->sin6_addr,
-		.fl6_dport = addr->sin6_port,
+		.daddr = dst_addr->sin6_addr,
+		.fl6_dport = dst_addr->sin6_port,
 		.fl6_sport = htons(wg->incoming_port),
-		.flowi6_oif = addr->sin6_scope_id,
+		.flowi6_oif = dst_addr->sin6_scope_id,
 		.flowi6_proto = IPPROTO_UDP
 		/* TODO: addr->sin6_flowinfo */
 	};
 	struct dst_entry *dst = NULL;
 	struct sock *sock;
 	int ret = 0;
+
+	if (src_addr)
+		fl.saddr = src_addr->sin6_addr;
 
 	skb->next = skb->prev = NULL;
 	skb->dev = netdev_pub(wg);
@@ -103,12 +109,12 @@ static inline int send6(struct wireguard_device *wg, struct sk_buff *skb, struct
 		security_sk_classify_flow(sock, flowi6_to_flowi(&fl));
 		ret = ipv6_stub->ipv6_dst_lookup(sock_net(sock), sock, &dst, &fl);
 		if (unlikely(ret)) {
-			net_dbg_ratelimited("No route to %pISpfsc, error %d\n", addr, ret);
+			net_dbg_ratelimited("No route to %pISpfsc, error %d\n", dst_addr, ret);
 			goto err;
 		} else if (unlikely(dst->dev == skb->dev)) {
 			dst_release(dst);
 			ret = -ELOOP;
-			net_dbg_ratelimited("Avoiding routing loop to %pISpfsc\n", addr);
+			net_dbg_ratelimited("Avoiding routing loop to %pISpfsc\n", dst_addr);
 			goto err;
 		}
 		if (cache)
@@ -138,10 +144,10 @@ int socket_send_skb_to_peer(struct wireguard_peer *peer, struct sk_buff *skb, ui
 	int ret = -EAFNOSUPPORT;
 
 	read_lock_bh(&peer->endpoint_lock);
-	if (peer->endpoint_addr.ss_family == AF_INET)
-		ret = send4(peer->device, skb, (struct sockaddr_in *)&peer->endpoint_addr, ds, &peer->endpoint_cache);
-	else if (peer->endpoint_addr.ss_family == AF_INET6)
-		ret = send6(peer->device, skb, (struct sockaddr_in6 *)&peer->endpoint_addr, ds, &peer->endpoint_cache);
+	if (peer->endpoint_dst_addr.ss_family == AF_INET)
+		ret = send4(peer->device, skb, (struct sockaddr_in *)&peer->endpoint_dst_addr, peer->endpoint_src_addr.ss_family == AF_INET ? (struct sockaddr_in *)&peer->endpoint_src_addr : NULL, ds, &peer->endpoint_cache);
+	else if (peer->endpoint_dst_addr.ss_family == AF_INET6)
+		ret = send6(peer->device, skb, (struct sockaddr_in6 *)&peer->endpoint_dst_addr, peer->endpoint_src_addr.ss_family == AF_INET6 ? (struct sockaddr_in6 *)&peer->endpoint_src_addr : NULL, ds, &peer->endpoint_cache);
 	if (likely(!ret))
 		peer->tx_bytes += skb_len;
 	read_unlock_bh(&peer->endpoint_lock);
@@ -163,13 +169,14 @@ int socket_send_buffer_as_reply_to_skb(struct wireguard_device *wg, struct sk_bu
 {
 	int ret = 0;
 	struct sk_buff *skb;
-	struct sockaddr_storage addr = { 0 };
+	struct sockaddr_storage dst_addr = { 0 }, src_addr = { 0 };
 
 	if (unlikely(!in_skb))
 		return -EINVAL;
-	ret = socket_addr_from_skb(&addr, in_skb);
+	ret = socket_src_addr_from_skb(&dst_addr, in_skb);
 	if (unlikely(ret < 0))
 		return ret;
+	socket_dst_addr_from_skb(&src_addr, in_skb);
 
 	skb = alloc_skb(len + SKB_HEADER_LEN, GFP_ATOMIC);
 	if (unlikely(!skb))
@@ -177,17 +184,17 @@ int socket_send_buffer_as_reply_to_skb(struct wireguard_device *wg, struct sk_bu
 	skb_reserve(skb, SKB_HEADER_LEN);
 	memcpy(skb_put(skb, len), out_buffer, len);
 
-	if (addr.ss_family == AF_INET)
-		ret = send4(wg, skb, (struct sockaddr_in *)&addr, 0, NULL);
-	else if (addr.ss_family == AF_INET6)
-		ret = send6(wg, skb, (struct sockaddr_in6 *)&addr, 0, NULL);
+	if (dst_addr.ss_family == AF_INET)
+		ret = send4(wg, skb, (struct sockaddr_in *)&dst_addr, src_addr.ss_family == AF_INET ? (struct sockaddr_in *)&src_addr : NULL, 0, NULL);
+	else if (dst_addr.ss_family == AF_INET6)
+		ret = send6(wg, skb, (struct sockaddr_in6 *)&dst_addr, src_addr.ss_family == AF_INET6 ? (struct sockaddr_in6 *)&src_addr : NULL, 0, NULL);
 	else
 		ret = -EAFNOSUPPORT;
 
 	return ret;
 }
 
-int socket_addr_from_skb(struct sockaddr_storage *sockaddr, struct sk_buff *skb)
+int socket_src_addr_from_skb(struct sockaddr_storage *sockaddr, struct sk_buff *skb)
 {
 	struct iphdr *ip4;
 	struct ipv6hdr *ip6;
@@ -215,22 +222,75 @@ int socket_addr_from_skb(struct sockaddr_storage *sockaddr, struct sk_buff *skb)
 	return 0;
 }
 
-void socket_set_peer_addr(struct wireguard_peer *peer, struct sockaddr_storage *sockaddr)
+int socket_dst_addr_from_skb(struct sockaddr_storage *sockaddr, struct sk_buff *skb)
+{
+	struct iphdr *ip4;
+	struct ipv6hdr *ip6;
+	struct udphdr *udp;
+	struct sockaddr_in *addr4;
+	struct sockaddr_in6 *addr6;
+
+	addr4 = (struct sockaddr_in *)sockaddr;
+	addr6 = (struct sockaddr_in6 *)sockaddr;
+	ip4 = ip_hdr(skb);
+	ip6 = ipv6_hdr(skb);
+	udp = udp_hdr(skb);
+	if (ip4->version == 4) {
+		addr4->sin_family = AF_INET;
+		addr4->sin_port = udp->dest;
+		addr4->sin_addr.s_addr = ip4->daddr;
+	} else if (ip4->version == 6) {
+		addr6->sin6_family = AF_INET6;
+		addr6->sin6_port = udp->dest;
+		addr6->sin6_addr = ip6->daddr;
+		addr6->sin6_scope_id = ipv6_iface_scope_id(&ip6->daddr, skb->skb_iif);
+		/* TODO: addr6->sin6_flowinfo */
+	} else
+		return -EINVAL;
+	return 0;
+}
+
+void socket_set_peer_dst_addr(struct wireguard_peer *peer, struct sockaddr_storage *sockaddr)
 {
 	if (sockaddr->ss_family == AF_INET) {
 		read_lock_bh(&peer->endpoint_lock);
-		if (!memcmp(sockaddr, &peer->endpoint_addr, sizeof(struct sockaddr_in)))
+		if (!memcmp(sockaddr, &peer->endpoint_dst_addr, sizeof(struct sockaddr_in)))
 			goto out;
 		read_unlock_bh(&peer->endpoint_lock);
 		write_lock_bh(&peer->endpoint_lock);
-		memcpy(&peer->endpoint_addr, sockaddr, sizeof(struct sockaddr_in));
+		memcpy(&peer->endpoint_dst_addr, sockaddr, sizeof(struct sockaddr_in));
 	} else if (sockaddr->ss_family == AF_INET6) {
 		read_lock_bh(&peer->endpoint_lock);
-		if (!memcmp(sockaddr, &peer->endpoint_addr, sizeof(struct sockaddr_in6)))
+		if (!memcmp(sockaddr, &peer->endpoint_dst_addr, sizeof(struct sockaddr_in6)))
 			goto out;
 		read_unlock_bh(&peer->endpoint_lock);
 		write_lock_bh(&peer->endpoint_lock);
-		memcpy(&peer->endpoint_addr, sockaddr, sizeof(struct sockaddr_in6));
+		memcpy(&peer->endpoint_dst_addr, sockaddr, sizeof(struct sockaddr_in6));
+	} else
+		return;
+	dst_cache_reset(&peer->endpoint_cache);
+	write_unlock_bh(&peer->endpoint_lock);
+	return;
+out:
+	read_unlock_bh(&peer->endpoint_lock);
+}
+
+void socket_set_peer_src_addr(struct wireguard_peer *peer, struct sockaddr_storage *sockaddr)
+{
+	if (sockaddr->ss_family == AF_INET) {
+		read_lock_bh(&peer->endpoint_lock);
+		if (!memcmp(sockaddr, &peer->endpoint_src_addr, sizeof(struct sockaddr_in)))
+			goto out;
+		read_unlock_bh(&peer->endpoint_lock);
+		write_lock_bh(&peer->endpoint_lock);
+		memcpy(&peer->endpoint_src_addr, sockaddr, sizeof(struct sockaddr_in));
+	} else if (sockaddr->ss_family == AF_INET6) {
+		read_lock_bh(&peer->endpoint_lock);
+		if (!memcmp(sockaddr, &peer->endpoint_src_addr, sizeof(struct sockaddr_in6)))
+			goto out;
+		read_unlock_bh(&peer->endpoint_lock);
+		write_lock_bh(&peer->endpoint_lock);
+		memcpy(&peer->endpoint_src_addr, sockaddr, sizeof(struct sockaddr_in6));
 	} else
 		return;
 	dst_cache_reset(&peer->endpoint_cache);

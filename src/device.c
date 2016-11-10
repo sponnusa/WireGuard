@@ -113,7 +113,7 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 	if (unlikely(!peer)) {
 #if defined(CONFIG_DYNAMIC_DEBUG) || defined(DEBUG)
 		struct sockaddr_storage addr;
-		socket_addr_from_skb(&addr, skb);
+		socket_src_addr_from_skb(&addr, skb);
 		net_dbg_ratelimited("No peer is configured for %pISc\n", &addr);
 #endif
 		skb_unsendable(skb, dev);
@@ -121,7 +121,7 @@ static netdev_tx_t xmit(struct sk_buff *skb, struct net_device *dev)
 	}
 
 	read_lock_bh(&peer->endpoint_lock);
-	ret = peer->endpoint_addr.ss_family != AF_INET && peer->endpoint_addr.ss_family != AF_INET6;
+	ret = peer->endpoint_dst_addr.ss_family != AF_INET && peer->endpoint_dst_addr.ss_family != AF_INET6;
 	read_unlock_bh(&peer->endpoint_lock);
 	if (unlikely(ret)) {
 		net_dbg_ratelimited("No valid endpoint has been configured or discovered for device\n");

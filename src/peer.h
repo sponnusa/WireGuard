@@ -18,7 +18,7 @@ struct wireguard_device;
 
 struct wireguard_peer {
 	struct wireguard_device *device;
-	struct sockaddr_storage endpoint_addr;
+	struct sockaddr_storage endpoint_dst_addr, endpoint_src_addr;
 	struct dst_cache endpoint_cache;
 	rwlock_t endpoint_lock;
 	struct noise_handshake handshake;
