@@ -17,6 +17,7 @@ static __always_inline void normalize_secret(uint8_t secret[CURVE25519_POINT_SIZ
 	secret[31] |= 64;
 }
 
+#ifdef HAVE_SEPARATE_IRQ_STACK
 #ifdef __SIZEOF_INT128__
 typedef uint64_t limb;
 typedef limb felem[5];
@@ -1221,6 +1222,219 @@ void curve25519(uint8_t mypublic[CURVE25519_POINT_SIZE], const uint8_t secret[CU
 	memzero_explicit(x, sizeof(x));
 	memzero_explicit(z, sizeof(z));
 	memzero_explicit(zmone, sizeof(zmone));
+}
+#endif
+#else
+typedef int64_t gf[16];
+static const gf _121665_2 = {0xDB41,1};
+
+/**
+ * Reduce mod 2^255 - 19, radix 2^16
+ */
+static void curve25519_car(gf o)
+{
+	int64_t c;
+	unsigned i;
+
+	for (i = 0; i < 16; ++i) {
+		o[i] += (1LL << 16);
+		c = o[i] >> 16;
+		o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
+		o[i] -= c << 16;
+	}
+}
+
+
+/**
+ * 256bit conditional swap
+ */
+static void curve25519_sel(gf p, gf q, unsigned b)
+{
+	int64_t t;
+	int64_t c = ~(b - 1);
+	unsigned i;
+
+	for (i = 0; i < 16; ++i) {
+		t = c & (p[i] ^ q[i]);
+		p[i] ^= t;
+		q[i] ^= t;
+	}
+}
+
+/**
+ * Freeze integer mod 2^255 - 19 and store
+ */
+static void curve25519_pack(uint8_t o[CURVE25519_POINT_SIZE], const gf n)
+{
+	unsigned i, j;
+	gf t;
+	memcpy(t, n, 128);
+
+	curve25519_car(t);
+	curve25519_car(t);
+	curve25519_car(t);
+
+	for (j = 0; j < 2; ++j) {
+		gf m;
+		unsigned b;
+		m[0] = t[0] - 0xffed;
+		for (i = 1; i < 15; ++i) {
+			m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
+			m[i - 1] &= 0xffff;
+		}
+		m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
+		b = (m[15] >> 16) & 1;
+		m[14] &= 0xffff;
+		curve25519_sel(t, m, 1 - b);
+	}
+
+	for (i = 0; i < 16; ++i) {
+		o[2 * i] = t[i] & 0xff;
+		o[2 * i + 1] = (uint8_t)(t[i] >> 8);
+	}
+}
+
+
+/**
+ * Load integer mod 2^255 - 19
+ */
+static void curve25519_unpack(gf o, const uint8_t n[CURVE25519_POINT_SIZE])
+{
+	unsigned i;
+	for (i = 0; i < 16; ++i)
+		o[i] = n[2 * i] + ((int64_t)n[2 * i + 1] << 8);
+	o[15] &= 0x7fff;
+}
+
+
+/**
+ * Add 256-bit integers, radix 2^16
+ */
+static void curve25519_add(gf o, const gf a, const gf b)
+{
+	unsigned i;
+	for (i = 0; i < 16; ++i)
+		o[i] = a[i] + b[i];
+}
+
+
+/**
+ * Subtract 256-bit integers, radix 2^16
+ */
+static void curve25519_sub(gf o, const gf a, const gf b)
+{
+	unsigned i;
+	for (i = 0; i < 16; ++i)
+		o[i] = a[i] - b[i];
+}
+
+
+/**
+ * Multiply mod 2^255-19, radix 2^16
+ */
+static void curve25519_mul(gf o, const gf a, const gf b)
+{
+	unsigned i, j;
+	int64_t t[31] = {0};
+
+	for ( i = 0; i < 16; i++) {
+		for (j = 0; j < 16; ++j)
+			t[i + j] += a[i] * b[j];
+	}
+
+	for (i = 0; i < 15; ++i)
+		t[i] += 38 * t[i + 16];
+
+	memcpy(o, t, 128);
+
+	curve25519_car(o);
+	curve25519_car(o);
+}
+
+
+/**
+ * Square mod 2^255-19, radix 2^16
+ */
+static void curve25519_square(gf o, const gf a)
+{
+	curve25519_mul(o, a, a);
+}
+
+
+/**
+ * Power 2^255 - 21 mod 2^255 - 19
+ */
+static void curve25519_inv(gf o, const gf i)
+{
+	int a;
+	gf c;
+	memcpy(c, i, 128);
+
+	for (a = 253; a >= 0; --a) {
+		curve25519_square(c, c);
+		if (a != 2 && a != 4)
+			curve25519_mul(c, c, i);
+	}
+	memcpy(o, c, 128);
+}
+
+
+void curve25519(uint8_t mypublic[CURVE25519_POINT_SIZE], const uint8_t secret[CURVE25519_POINT_SIZE], const uint8_t basepoint[CURVE25519_POINT_SIZE])
+{
+	uint8_t priv_key_m[CURVE25519_POINT_SIZE];
+	int64_t x[80];
+	int i;
+
+	gf a, b, c, d, e, f;
+
+	memcpy(priv_key_m, secret, CURVE25519_POINT_SIZE);
+	normalize_secret(priv_key_m);
+
+	curve25519_unpack(x, basepoint);
+
+	memset(a, 0, 128);
+	memcpy(b, x, 128);
+	memset(c, 0, 128);
+	memset(d, 0, 128);
+	a[0] = 1;
+	d[0] = 1;
+	for (i = 254; i >= 0; --i) {
+		unsigned r = (priv_key_m[i >> 3] >> (i & 7)) & 1;
+
+		curve25519_sel(a, b, r);
+		curve25519_sel(c, d, r);
+
+		curve25519_add(e, a, c);
+		curve25519_sub(a, a, c);
+		curve25519_add(c, b, d);
+		curve25519_sub(b, b, d);
+		curve25519_square(d, e);
+		curve25519_square(f, a);
+		curve25519_mul(a, c, a);
+		curve25519_mul(c, b, e);
+		curve25519_add(e, a, c);
+		curve25519_sub(a, a, c);
+		curve25519_square(b, a);
+		curve25519_sub(c, d, f);
+		curve25519_mul(a, c, _121665_2);
+		curve25519_add(a, a, d);
+		curve25519_mul(c, c, a);
+		curve25519_mul(a, d, f);
+		curve25519_mul(d, b, x);
+		curve25519_square(b, e);
+
+		curve25519_sel(a, b, r);
+		curve25519_sel(c, d, r);
+	}
+
+	memcpy(x + 16, a, 128);
+	memcpy(x + 32, c, 128);
+	memcpy(x + 48, b, 128);
+	memcpy(x + 64, d, 128);
+
+	curve25519_inv(x + 32, x + 32);
+	curve25519_mul(x + 16, x + 16, x + 32);
+	curve25519_pack(mypublic, x + 16);
 }
 #endif
 
