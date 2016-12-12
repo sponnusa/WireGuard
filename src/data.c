@@ -107,7 +107,7 @@ static inline unsigned int skb_padding(struct sk_buff *skb)
 	 * gives us a packet that's bigger than the MTU. Now that we support GSO, this
 	 * shouldn't be a real problem, and this can likely be removed. But, caution! */
 	unsigned int last_unit = skb->len % skb->dev->mtu;
-	unsigned int padded_size = (last_unit + MESSAGE_PADDING_MULTIPLE - 1) & ~(MESSAGE_PADDING_MULTIPLE - 1);
+	unsigned int padded_size = (last_unit + MESSAGE_PADDING_SUFFIX_MULTIPLE - 1) & ~(MESSAGE_PADDING_SUFFIX_MULTIPLE - 1);
 	if (padded_size > skb->dev->mtu)
 		padded_size = skb->dev->mtu;
 	return padded_size - last_unit;
@@ -144,9 +144,13 @@ static inline void skb_encrypt(struct sk_buff *skb, struct noise_keypair *keypai
 	if (likely(!skb_checksum_setup(skb, true)))
 		skb_checksum_help(skb);
 
+	if (cb->plaintext_len)
+		memset(skb_push(skb, MESSAGE_PADDING_PREFIX_LENGTH), 0, MESSAGE_PADDING_PREFIX_LENGTH);
+
 	/* Only after checksumming can we safely add on the padding at the end and the header. */
 	header = (struct message_data *)skb_push(skb, sizeof(struct message_data));
 	header->header.type = MESSAGE_DATA;
+	header->header.reserved_zero = 0;
 	header->key_idx = keypair->remote_index;
 	header->counter = cpu_to_le64(cb->nonce);
 	pskb_put(skb, cb->trailer, cb->trailer_len);
@@ -160,6 +164,7 @@ static inline void skb_encrypt(struct sk_buff *skb, struct noise_keypair *keypai
 static inline bool skb_decrypt(struct sk_buff *skb, u8 num_frags, u64 nonce, struct noise_symmetric_key *key)
 {
 	struct scatterlist sg[num_frags]; /* This should be bound to at most 128 by the caller. */
+	u8 *padding_prefix_before;
 
 	if (unlikely(!key))
 		return false;
@@ -175,7 +180,18 @@ static inline bool skb_decrypt(struct sk_buff *skb, u8 num_frags, u64 nonce, str
 	if (!chacha20poly1305_decrypt_sg(sg, sg, skb->len, NULL, 0, nonce, key->key))
 		return false;
 
-	return pskb_trim(skb, skb->len - noise_encrypted_len(0)) == 0;
+	if (pskb_trim(skb, skb->len - noise_encrypted_len(0)))
+		return false;
+
+	if (skb->len) {
+		if (skb->len < MESSAGE_PADDING_PREFIX_LENGTH)
+			return false;
+		padding_prefix_before = pskb_pull(skb, MESSAGE_PADDING_PREFIX_LENGTH);
+		if (!padding_prefix_before || padding_prefix_before[-1] || padding_prefix_before[-2])
+			return false;
+	}
+
+	return true;
 }
 
 static inline bool get_encryption_nonce(u64 *nonce, struct noise_symmetric_key *key)
@@ -272,6 +288,8 @@ int packet_create_data(struct sk_buff_head *queue, struct wireguard_peer *peer, 
 		padding_len = skb_padding(skb);
 		cb->trailer_len = padding_len + noise_encrypted_len(0);
 		cb->plaintext_len = skb->len + padding_len;
+		if (skb->len)
+			cb->plaintext_len += MESSAGE_PADDING_PREFIX_LENGTH;
 
 		/* Store the ds bit in the cb */
 		cb->ds = ip_tunnel_ecn_encap(0 /* No outer TOS: no leak. TODO: should we use flowi->tos as outer? */, ip_hdr(skb), skb);

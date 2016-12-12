@@ -340,6 +340,7 @@ bool noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 		goto out;
 
 	dst->header.type = MESSAGE_HANDSHAKE_INITIATION;
+	dst->header.reserved_zero = 0;
 
 	handshake_init(handshake->key, handshake->chaining_key, handshake->hash, handshake->remote_static,
 		       handshake->static_identity->has_psk ? handshake->static_identity->preshared_key : NULL);
@@ -460,6 +461,7 @@ bool noise_handshake_create_response(struct message_handshake_response *dst, str
 		goto out;
 
 	dst->header.type = MESSAGE_HANDSHAKE_RESPONSE;
+	dst->header.reserved_zero = 0;
 	dst->receiver_index = handshake->remote_index;
 
 	/* e */

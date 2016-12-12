@@ -164,6 +164,7 @@ void cookie_message_create(struct message_handshake_cookie *dst, struct sk_buff 
 	u8 cookie[COOKIE_LEN];
 
 	dst->header.type = MESSAGE_HANDSHAKE_COOKIE;
+	dst->header.reserved_zero = 0;
 	dst->receiver_index = index;
 	get_random_bytes(dst->salt, COOKIE_SALT_LEN);
 	blake2s(dst->salt, dst->salt, NULL, COOKIE_SALT_LEN, COOKIE_SALT_LEN, 0); /* Avoid directly transmitting RNG output. */

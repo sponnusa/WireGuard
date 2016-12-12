@@ -251,7 +251,7 @@ static void setup(struct net_device *dev)
 	dev->hard_header_len = 0;
 	dev->addr_len = 0;
 	dev->needed_headroom = DATA_PACKET_HEAD_ROOM;
-	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_MULTIPLE);
+	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_SUFFIX_MULTIPLE);
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 3, 0)
@@ -263,7 +263,7 @@ static void setup(struct net_device *dev)
 	dev->features |= WG_NETDEV_FEATURES;
 	dev->hw_features |= WG_NETDEV_FEATURES;
 	dev->hw_enc_features |= WG_NETDEV_FEATURES;
-	dev->mtu = ETH_DATA_LEN - MESSAGE_MINIMUM_LENGTH - sizeof(struct udphdr) - max(sizeof(struct ipv6hdr), sizeof(struct iphdr));
+	dev->mtu = ETH_DATA_LEN - MESSAGE_MINIMUM_LENGTH - MESSAGE_PADDING_PREFIX_LENGTH - sizeof(struct udphdr) - max(sizeof(struct ipv6hdr), sizeof(struct iphdr));
 
 	/* We need to keep the dst around in case of icmp replies. */
 	netif_keep_dst(dev);

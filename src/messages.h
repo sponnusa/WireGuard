@@ -64,6 +64,7 @@ enum message_type {
 
 struct message_header {
 	u8 type;
+	u8 reserved_zero;
 } __packed;
 
 struct message_macs {
@@ -106,12 +107,13 @@ struct message_data {
 #define message_data_len(plain_len) (noise_encrypted_len(plain_len) + sizeof(struct message_data))
 
 enum message_alignments {
-	MESSAGE_PADDING_MULTIPLE = 16,
-	MESSAGE_MINIMUM_LENGTH = message_data_len(0)
+	MESSAGE_PADDING_SUFFIX_MULTIPLE = 16,
+	MESSAGE_PADDING_PREFIX_LENGTH = 2,
+	MESSAGE_MINIMUM_LENGTH = message_data_len(0),
 };
 
 #define SKB_HEADER_LEN (max(sizeof(struct iphdr), sizeof(struct ipv6hdr)) + sizeof(struct udphdr) + NET_SKB_PAD)
-#define DATA_PACKET_HEAD_ROOM ALIGN(sizeof(struct message_data) + SKB_HEADER_LEN, 4)
+#define DATA_PACKET_HEAD_ROOM ALIGN(sizeof(struct message_data) + MESSAGE_PADDING_PREFIX_LENGTH + SKB_HEADER_LEN, 4)
 
 enum {
 	HANDSHAKE_DSCP = 0b10001000 /* AF41, plus 00 ECN */
@@ -120,7 +122,7 @@ enum {
 static inline enum message_type message_determine_type(void *src, size_t src_len)
 {
 	struct message_header *header = src;
-	if (unlikely(src_len < sizeof(struct message_header)))
+	if (unlikely(src_len < sizeof(struct message_header) || header->reserved_zero != 0))
 		return MESSAGE_INVALID;
 	if (header->type == MESSAGE_DATA && src_len >= MESSAGE_MINIMUM_LENGTH)
 		return MESSAGE_DATA;
