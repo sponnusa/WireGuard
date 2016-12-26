@@ -14,8 +14,12 @@ struct sk_buff;
 struct cookie_checker {
 	u8 secret[NOISE_HASH_LEN];
 	u8 cookie_encryption_key[NOISE_SYMMETRIC_KEY_LEN];
+	u8 cookie_derived_encryption_key[NOISE_SYMMETRIC_KEY_LEN];
+	u8 cookie_nonce_random[HCHACHA20_NONCELEN];
 	u64 secret_birthdate;
+	atomic64_t cookie_nonce_sequential;
 	struct rw_semaphore secret_lock;
+	struct mutex nonce_lock;
 	struct ratelimiter ratelimiter;
 	struct wireguard_device *device;
 };

@@ -17,9 +17,11 @@ int cookie_checker_init(struct cookie_checker *checker, struct wireguard_device 
 	if (ret)
 		return ret;
 	init_rwsem(&checker->secret_lock);
+	init_rwsem(&checker->nonce_lock);
 	checker->secret_birthdate = get_jiffies_64();
 	get_random_bytes(checker->secret, NOISE_HASH_LEN);
 	checker->device = wg;
+	atomic64_set(&checker->cookie_nonce_sequential, 0);
 	return 0;
 }
 
@@ -41,6 +43,7 @@ void cookie_checker_precompute_keys(struct cookie_checker *checker, struct wireg
 		precompute_peer_key(peer, checker->device->static_identity.has_psk ? checker->device->static_identity.preshared_key : NULL);
 	else {
 		blake2s(checker->cookie_encryption_key, checker->device->static_identity.static_public, checker->device->static_identity.preshared_key, NOISE_SYMMETRIC_KEY_LEN, NOISE_PUBLIC_KEY_LEN, checker->device->static_identity.has_psk ? NOISE_SYMMETRIC_KEY_LEN : 0);
+		atomic64_set(&checker->cookie_nonce_sequential, 0);
 		peer_for_each_unlocked(checker->device, precompute_peer_key, checker->device->static_identity.has_psk ? checker->device->static_identity.preshared_key : NULL);
 	}
 
@@ -186,14 +189,24 @@ void cookie_message_create(struct message_handshake_cookie *dst, struct sk_buff 
 	struct message_macs *macs = (struct message_macs *)((u8 *)data_start + data_len - sizeof(struct message_macs));
 	u8 key[NOISE_SYMMETRIC_KEY_LEN];
 	u8 cookie[COOKIE_LEN];
+	u64 nonce = atomic64_inc_not_zero(&checker->cookie_nonce_sequential);
+
+	if (unlikely(!nonce)) {
+		if (mutex_trylock(&checker->nonce_lock)) {
+			get_random_bytes(checker->cookie_nonce_random, HCHACHA20_NONCELEN);
+			hchacha20(checker->cookie_derived_encryption_key, checker->cookie_nonce_random, checker->cookie_encryption_key);
+		} else
+			mutex_lock(&checker->nonce_lock);
+		mutex_unlock(&checker->nonce_lock);
+		nonce = atomic64_inc_return(&checker->cookie_nonce_sequential) - 1;
+	}
 
 	dst->header.type = cpu_to_le32(MESSAGE_HANDSHAKE_COOKIE);
 	dst->receiver_index = index;
-	get_random_bytes(dst->nonce, COOKIE_NONCE_LEN);
-	blake2s(dst->nonce, dst->nonce, NULL, COOKIE_NONCE_LEN, COOKIE_NONCE_LEN, 0); /* Avoid directly transmitting RNG output. */
-
+	memcpy(dst->nonce, checker->cookie_nonce_random, HCHACHA20_NONCELEN);
+	memcpy(dst->nonce + HCHACHA20_NONCELEN, &nonce, sizeof(nonce));
 	make_cookie(cookie, skb, checker);
-	xchacha20poly1305_encrypt(dst->encrypted_cookie, cookie, COOKIE_LEN, macs->mac1, COOKIE_LEN, dst->nonce, checker->cookie_encryption_key);
+	chacha20poly1305_encrypt(dst->encrypted_cookie, cookie, COOKIE_LEN, macs->mac1, COOKIE_LEN, nonce, checker->cookie_derived_encryption_key);
 
 	memzero_explicit(key, NOISE_HASH_LEN);
 	memzero_explicit(cookie, COOKIE_LEN);

@@ -140,7 +140,7 @@ static void chacha20_generic_block(struct chacha20_ctx *ctx, void *stream)
 
 static const char constant[16] = "expand 32-byte k";
 
-static void hchacha20(u8 derived_key[CHACHA20POLY1305_KEYLEN], const u8 nonce[16], const u8 key[CHACHA20POLY1305_KEYLEN])
+void hchacha20(u8 derived_key[CHACHA20POLY1305_KEYLEN], const u8 nonce[HCHACHA20_NONCELEN], const u8 key[CHACHA20POLY1305_KEYLEN])
 {
 	u32 x[CHACHA20_BLOCK_SIZE / sizeof(u32)];
 	__le32 *out = (__force __le32 *)derived_key;
