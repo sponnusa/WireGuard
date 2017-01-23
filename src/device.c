@@ -72,7 +72,7 @@ static int suspending_clear_noise_peers(struct notifier_block *nb, unsigned long
 
 static int stop_peer(struct wireguard_peer *peer, void *data)
 {
-	timers_uninit_peer_wait(peer);
+	timers_uninit_peer(peer);
 	clear_noise_peer(peer, data);
 	return 0;
 }
