@@ -55,7 +55,7 @@ check:
 	$(MAKE) -C tools check
 
 cloc: clean
-	cloc $(filter-out compat.h, $(wildcard *.c) $(wildcard *.h))
+	cloc $(wildcard *.c) $(wildcard *.h)
 
 -include tests/debug.mk
 
