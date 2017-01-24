@@ -202,8 +202,13 @@ static inline void queue_encrypt_reset(struct sk_buff_head *queue, struct noise_
 	struct sk_buff *skb;
 	bool have_simd = chacha20poly1305_init_simd();
 	skb_queue_walk(queue, skb) {
+		bool l4_hash = skb->l4_hash, sw_hash = skb->sw_hash;
+		u32 hash = skb->hash;
 		skb_encrypt(skb, keypair, have_simd);
 		skb_reset(skb);
+		skb->l4_hash = l4_hash;
+		skb->sw_hash = sw_hash;
+		skb->hash = hash;
 	}
 	chacha20poly1305_deinit_simd(have_simd);
 	noise_keypair_put(keypair);
